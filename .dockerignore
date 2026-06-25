@@ -8,3 +8,5 @@ __pycache__/
 examples/
 docker-compose.yml
 .github/
+metrics.py
+dashboard/

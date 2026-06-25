@@ -1,0 +1,70 @@
+name: Orchestrator metrics dashboard
+
+# Collects effectiveness metrics for the Dependabot -> Devin orchestrator and
+# publishes a dashboard. It does two things:
+#   1. Writes a Markdown report to the Actions run summary (open the run to see
+#      it) - zero infra.
+#   2. Publishes a Chart.js dashboard to GitHub Pages from metrics.json.
+#
+# Refresh cadence: hourly (plus manual dispatch). This deliberately avoids a
+# `workflow_run` trigger chained off the scanner - that trigger runs with the
+# default-branch workflow and elevated `pages: write` perms, which zizmor flags
+# as a dangerous pattern. Hourly is plenty fresh for a dashboard.
+#
+# Required repository secrets:
+#   FORK_TOKEN    - PAT that can read issues on FORK_REPO.
+#   DEVIN_API     - Devin service-user token (optional; enables session metrics).
+#   DEVIN_ORG_ID  - Devin organization ID (optional).
+# Optional repository variables:
+#   FORK_REPO     - defaults to aneeshacognition/superset.
+
+on:
+  schedule:
+    # Hourly, offset from the scanner so it reflects the latest run.
+    - cron: "30 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: orchestrator-metrics
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  metrics:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Collect metrics
+        env:
+          GITHUB_TOKEN: ${{ secrets.FORK_TOKEN }}
+          FORK_REPO: ${{ vars.FORK_REPO || 'aneeshacognition/superset' }}
+          SCANNER_REPO: ${{ github.repository }}
+          DEVIN_API_KEY: ${{ secrets.DEVIN_API }}
+          DEVIN_ORG_ID: ${{ secrets.DEVIN_ORG_ID }}
+          METRICS_JSON_PATH: dashboard/metrics.json
+        run: python3 metrics.py
+
+      - name: Configure Pages
+        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
+
+      - name: Upload dashboard artifact
+        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
+        with:
+          path: dashboard
+
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4

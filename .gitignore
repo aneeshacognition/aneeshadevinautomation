@@ -3,3 +3,7 @@
 !.env.example
 __pycache__/
 *.pyc
+
+# generated metrics snapshot (the Pages workflow regenerates it each run)
+dashboard/metrics.json
+METRICS.md
