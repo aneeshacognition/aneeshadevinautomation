@@ -1,0 +1,67 @@
+name: Dependabot backlog scanner (Devin)
+
+# Builds and runs the Dockerized scanner from this repo. It reads the upstream
+# Dependabot backlog + ignore-list and files de-duplicated remediation/unblock
+# issues on the fork, optionally starting a Devin session per issue.
+#
+# Required repository secrets (Settings > Secrets and variables > Actions):
+#   FORK_TOKEN    - PAT with issues:write on FORK_REPO (the built-in
+#                   GITHUB_TOKEN only has access to THIS repo, not the fork)
+#   DEVIN_API     - Devin service-user token with ManageOrgSessions (optional)
+#   DEVIN_ORG_ID  - Devin organization ID, prefix org- (optional)
+# Optional repository variables:
+#   UPSTREAM_REPO, FORK_REPO, STUCK_MIN_FAILURES, MAX_ISSUES_PER_RUN, DEVIN_MAX_ACU
+
+on:
+  schedule:
+    # Every 6 hours. GitHub Actions cron runs in UTC.
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "List actions without filing issues or starting sessions"
+        type: boolean
+        default: true
+
+concurrency:
+  group: dependabot-scanner
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Build scanner image
+        run: docker build -t dependabot-scanner:ci .
+
+      - name: Scan backlog and file issues
+        env:
+          GITHUB_TOKEN: ${{ secrets.FORK_TOKEN }}
+          UPSTREAM_REPO: ${{ vars.UPSTREAM_REPO || 'apache/superset' }}
+          FORK_REPO: ${{ vars.FORK_REPO || 'aneeshacognition/superset' }}
+          STUCK_MIN_FAILURES: ${{ vars.STUCK_MIN_FAILURES || '1' }}
+          MAX_ISSUES_PER_RUN: ${{ vars.MAX_ISSUES_PER_RUN || '10' }}
+          DEVIN_MAX_ACU: ${{ vars.DEVIN_MAX_ACU || '' }}
+          DEVIN_API_KEY: ${{ secrets.DEVIN_API }}
+          DEVIN_ORG_ID: ${{ secrets.DEVIN_ORG_ID }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
+        run: |
+          docker run --rm \
+            -e GITHUB_TOKEN \
+            -e UPSTREAM_REPO \
+            -e FORK_REPO \
+            -e STUCK_MIN_FAILURES \
+            -e MAX_ISSUES_PER_RUN \
+            -e DEVIN_MAX_ACU \
+            -e DEVIN_API_KEY \
+            -e DEVIN_ORG_ID \
+            -e DRY_RUN \
+            dependabot-scanner:ci

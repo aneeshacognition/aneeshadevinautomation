@@ -1,0 +1,20 @@
+# Convenience wrapper for running the scanner locally.
+#
+#   # 1. Put your tokens / config in a .env file (see .env.example)
+#   # 2. Dry run (lists actions, files nothing):
+#   docker compose run --rm scanner
+#   # 3. Real run (files issues + triggers Devin): set DRY_RUN=0 in .env
+#
+services:
+  scanner:
+    build: .
+    image: dependabot-scanner:local
+    env_file:
+      - .env
+    environment:
+      # Defaults; override any of these in .env.
+      UPSTREAM_REPO: ${UPSTREAM_REPO:-apache/superset}
+      FORK_REPO: ${FORK_REPO:-aneeshacognition/superset}
+      DRY_RUN: ${DRY_RUN:-1}
+      STUCK_MIN_FAILURES: ${STUCK_MIN_FAILURES:-1}
+      MAX_ISSUES_PER_RUN: ${MAX_ISSUES_PER_RUN:-10}

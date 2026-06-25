@@ -1,0 +1,112 @@
+name: Dependabot CI failed (nudge Devin)
+
+# Nudges the Devin orchestrator the moment CI fails on a dependabot/* branch.
+#
+# This listens to `check_suite: completed` rather than a single named CI
+# workflow because Superset runs CI across many workflows; a check suite is the
+# aggregate "CI finished" signal for a commit, so it fires once per commit no
+# matter which workflow failed. (The docs guide shows the single-workflow
+# `workflow_run` form; this is the multi-workflow equivalent.)
+#
+# Like all `check_suite`-triggered workflows, this only takes effect from the
+# repository's default branch, so it must be merged to `master` to arm.
+#
+# Required repository secrets (Settings > Secrets and variables > Actions):
+#   DEVIN_API     - service-user token with the ManageOrgSessions permission
+#   DEVIN_ORG_ID  - organization ID (prefix: org-)
+
+on:
+  check_suite:
+    types: [completed]
+
+permissions:
+  contents: read
+  checks: read
+  pull-requests: read
+
+jobs:
+  nudge-devin:
+    # Only fire for failed suites on a dependabot/* branch.
+    if: >
+      github.event.check_suite.conclusion == 'failure' &&
+      startsWith(github.event.check_suite.head_branch, 'dependabot/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Collect failing checks
+        id: failure
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const suite = context.payload.check_suite;
+            const runs = await github.paginate(
+              github.rest.checks.listForSuite,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                check_suite_id: suite.id,
+                per_page: 100,
+              },
+            );
+            const bad = ['failure', 'timed_out', 'cancelled', 'action_required'];
+            const failed = [
+              ...new Set(
+                runs
+                  .filter(r => bad.includes(r.conclusion))
+                  .map(r => r.name),
+              ),
+            ];
+            const pr = (suite.pull_requests || [])[0];
+            core.setOutput('failed_checks', failed.join(', '));
+            core.setOutput('branch', suite.head_branch);
+            core.setOutput('sha', suite.head_sha);
+            core.setOutput('pr_number', pr ? String(pr.number) : '');
+            core.setOutput('pr_url', pr ? pr.html_url : '');
+
+      - name: Trigger Devin session
+        # Scope to failures a code change can actually fix; skip pure
+        # infrastructure/Docker timeouts that an auto-fix won't resolve.
+        if: >
+          contains(steps.failure.outputs.failed_checks, 'test') ||
+          contains(steps.failure.outputs.failed_checks, 'lint') ||
+          contains(steps.failure.outputs.failed_checks, 'mypy') ||
+          contains(steps.failure.outputs.failed_checks, 'eslint') ||
+          contains(steps.failure.outputs.failed_checks, 'prettier') ||
+          contains(steps.failure.outputs.failed_checks, 'type') ||
+          contains(steps.failure.outputs.failed_checks, 'build') ||
+          contains(steps.failure.outputs.failed_checks, 'frontend') ||
+          contains(steps.failure.outputs.failed_checks, 'python') ||
+          contains(steps.failure.outputs.failed_checks, 'pre-commit')
+        env:
+          DEVIN_API_KEY: ${{ secrets.DEVIN_API }}
+          DEVIN_ORG_ID: ${{ secrets.DEVIN_ORG_ID }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ steps.failure.outputs.branch }}
+          SHA: ${{ steps.failure.outputs.sha }}
+          PR_NUMBER: ${{ steps.failure.outputs.pr_number }}
+          PR_URL: ${{ steps.failure.outputs.pr_url }}
+          FAILED_CHECKS: ${{ steps.failure.outputs.failed_checks }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DEVIN_API_KEY:-}" ] || [ -z "${DEVIN_ORG_ID:-}" ]; then
+            echo "DEVIN_API_KEY / DEVIN_ORG_ID not set; skipping nudge"
+            exit 0
+          fi
+          PROMPT="CI failed on dependabot branch ${BRANCH} (commit ${SHA}) in ${REPO}. \
+          PR: ${PR_URL:-none}. Failed checks: ${FAILED_CHECKS}. \
+          Check out the branch, read the failing CI logs, fix what the dependency bump broke \
+          (code, types, lockfile, snapshots), and push a fix to the branch so CI re-runs. \
+          Follow AGENTS.md and run pre-commit before pushing. If you cannot resolve it, \
+          comment on the PR explaining what you found."
+          PAYLOAD=$(jq -n \
+            --arg prompt "$PROMPT" \
+            --arg title "Fix dependabot CI: ${BRANCH}" \
+            --arg repo "https://github.com/${REPO}" \
+            --arg tag_branch "dep-ci-${BRANCH}" \
+            --arg tag_sha "sha-${SHA}" \
+            '{prompt: $prompt, title: $title, repos: [$repo],
+              tags: ["dependabot", "dependabot-ci-failed", $tag_branch, $tag_sha]}')
+          curl -sS -X POST \
+            "https://api.devin.ai/v3/organizations/${DEVIN_ORG_ID}/sessions" \
+            -H "Authorization: Bearer ${DEVIN_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD"
