@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Dependabot → Devin orchestrator — dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <style>
+      :root {
+        --bg: #0d1117;
+        --card: #161b22;
+        --border: #30363d;
+        --text: #e6edf3;
+        --muted: #8b949e;
+        --green: #2ea043;
+        --red: #f85149;
+        --amber: #d29922;
+        --blue: #58a6ff;
+        --purple: #a371f7;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          Helvetica, Arial, sans-serif;
+      }
+      header {
+        padding: 28px 32px 12px;
+        border-bottom: 1px solid var(--border);
+      }
+      header h1 { margin: 0 0 4px; font-size: 22px; }
+      header .sub { color: var(--muted); font-size: 13px; }
+      main { padding: 24px 32px 48px; max-width: 1100px; margin: 0 auto; }
+      .kpis {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 16px;
+        margin-bottom: 28px;
+      }
+      .kpi {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 16px 18px;
+      }
+      .kpi .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+      .kpi .value { font-size: 30px; font-weight: 650; margin-top: 6px; }
+      .kpi .value small { font-size: 14px; color: var(--muted); font-weight: 400; }
+      .grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 20px;
+      }
+      @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } }
+      .panel {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 18px 20px;
+      }
+      .panel h2 { margin: 0 0 14px; font-size: 15px; font-weight: 600; }
+      .panel.wide { grid-column: 1 / -1; }
+      canvas { max-height: 280px; }
+      .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; }
+      .pill.ok { background: rgba(46,160,67,.15); color: var(--green); }
+      .pill.bad { background: rgba(248,81,73,.15); color: var(--red); }
+      .pill.warn { background: rgba(210,153,34,.15); color: var(--amber); }
+      footer { color: var(--muted); font-size: 12px; padding: 0 32px 32px; max-width: 1100px; margin: 0 auto; }
+      a { color: var(--blue); }
+      .empty { color: var(--muted); font-style: italic; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Dependabot → Devin orchestrator</h1>
+      <div class="sub" id="subtitle">Loading metrics…</div>
+    </header>
+    <main>
+      <section class="kpis" id="kpis"></section>
+      <section class="grid">
+        <div class="panel">
+          <h2>Tasks: open vs. closed</h2>
+          <canvas id="tasksChart"></canvas>
+        </div>
+        <div class="panel">
+          <h2>Devin sessions</h2>
+          <canvas id="devinChart"></canvas>
+          <div id="devinEmpty" class="empty" style="display:none">
+            Devin session metrics unavailable.
+          </div>
+        </div>
+        <div class="panel wide">
+          <h2>Throughput — issues opened vs. closed (30 days)</h2>
+          <canvas id="trendChart"></canvas>
+        </div>
+      </section>
+    </main>
+    <footer id="footer"></footer>
+
+    <script>
+      const COLORS = {
+        green: "#2ea043", red: "#f85149", amber: "#d29922",
+        blue: "#58a6ff", purple: "#a371f7", muted: "#8b949e",
+      };
+      Chart.defaults.color = "#8b949e";
+      Chart.defaults.borderColor = "#30363d";
+      Chart.defaults.font.family = "inherit";
+
+      function fmtHours(h) {
+        if (h === null || h === undefined) return "n/a";
+        return h < 48 ? h.toFixed(1) + "h" : (h / 24).toFixed(1) + "d";
+      }
+      function fmtPct(p) { return p === null || p === undefined ? "n/a" : p + "%"; }
+      function fmtTs(s) {
+        if (!s) return "never";
+        const d = new Date(s);
+        return d.toISOString().slice(0, 16).replace("T", " ") + " UTC";
+      }
+      function kpi(label, value, sub) {
+        return `<div class="kpi"><div class="label">${label}</div>
+          <div class="value">${value}${sub ? ` <small>${sub}</small>` : ""}</div></div>`;
+      }
+
+      async function load() {
+        let data;
+        try {
+          const res = await fetch("metrics.json?_=" + Date.now());
+          data = await res.json();
+        } catch (e) {
+          document.getElementById("subtitle").textContent =
+            "Could not load metrics.json — run the metrics workflow first.";
+          return;
+        }
+        render(data);
+      }
+
+      function render(d) {
+        const t = d.issues.totals;
+        const devin = d.devin || {};
+        const pipe = d.pipeline || {};
+
+        document.getElementById("subtitle").innerHTML =
+          `${d.fork_repo} · snapshot ${fmtTs(d.generated_at)}`;
+
+        const cards = [];
+        cards.push(kpi("Tasks created", t.total, ""));
+        cards.push(kpi("Open / Closed", `${t.open} / ${t.closed}`, ""));
+        cards.push(kpi("Median resolution", fmtHours(t.mttr_hours), ""));
+        if (devin.available) {
+          cards.push(kpi("Devin success", fmtPct(devin.success_rate_pct),
+            `${devin.finished}✓ / ${devin.failed}✗`));
+          cards.push(kpi("Active sessions", devin.active + devin.blocked,
+            `${devin.blocked} blocked`));
+        }
+        if (pipe.available) {
+          const concl = pipe.last_conclusion;
+          const pillCls = concl === "success" ? "ok" : concl ? "bad" : "warn";
+          cards.push(kpi("Scanner health",
+            `<span class="pill ${pillCls}">${fmtPct(pipe.success_rate_pct)}</span>`,
+            `last: ${concl || "n/a"}`));
+        }
+        document.getElementById("kpis").innerHTML = cards.join("");
+
+        // Tasks open vs closed (stacked by type)
+        const rem = d.issues.by_type.remediation;
+        const unb = d.issues.by_type.unblock;
+        new Chart(document.getElementById("tasksChart"), {
+          type: "bar",
+          data: {
+            labels: ["Remediation", "Unblock"],
+            datasets: [
+              { label: "Open", data: [rem.open, unb.open], backgroundColor: COLORS.amber },
+              { label: "Closed", data: [rem.closed, unb.closed], backgroundColor: COLORS.green },
+            ],
+          },
+          options: {
+            responsive: true,
+            scales: { x: { stacked: true }, y: { stacked: true, beginAtZero: true } },
+          },
+        });
+
+        // Devin sessions donut
+        if (devin.available && devin.total > 0) {
+          new Chart(document.getElementById("devinChart"), {
+            type: "doughnut",
+            data: {
+              labels: ["Finished", "Active", "Blocked", "Failed", "Other"],
+              datasets: [{
+                data: [devin.finished, devin.active, devin.blocked, devin.failed, devin.other],
+                backgroundColor: [COLORS.green, COLORS.blue, COLORS.amber, COLORS.red, COLORS.muted],
+              }],
+            },
+            options: { responsive: true, plugins: { legend: { position: "right" } } },
+          });
+        } else {
+          document.getElementById("devinChart").style.display = "none";
+          const empty = document.getElementById("devinEmpty");
+          empty.style.display = "block";
+          if (devin && devin.reason) empty.textContent = "Devin metrics unavailable: " + devin.reason;
+        }
+
+        // Throughput trend
+        const trend = d.issues.trend || [];
+        new Chart(document.getElementById("trendChart"), {
+          type: "line",
+          data: {
+            labels: trend.map((x) => x.date.slice(5)),
+            datasets: [
+              { label: "Opened", data: trend.map((x) => x.opened),
+                borderColor: COLORS.blue, backgroundColor: "transparent", tension: .3 },
+              { label: "Closed", data: trend.map((x) => x.closed),
+                borderColor: COLORS.green, backgroundColor: "transparent", tension: .3 },
+            ],
+          },
+          options: { responsive: true, scales: { y: { beginAtZero: true, ticks: { precision: 0 } } } },
+        });
+
+        const links = [];
+        links.push(`<a href="https://github.com/${d.fork_repo}/issues?q=label%3Adependabot-remediation%2Cdependabot-unblock">View tracking issues</a>`);
+        if (pipe.last_run_url) links.push(`<a href="${pipe.last_run_url}">Latest scanner run</a>`);
+        links.push(`<a href="metrics.json">Raw metrics.json</a>`);
+        document.getElementById("footer").innerHTML = links.join(" · ");
+      }
+
+      load();
+    </script>
+  </body>
+</html>

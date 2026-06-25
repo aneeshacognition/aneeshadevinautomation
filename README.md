@@ -104,7 +104,7 @@ found 22 stuck Dependabot PR(s)
 found 9 pinned dependency(ies) in the ignore-list
 [dry-run] would create issue: [dependabot-unblock] react-icons
 ...
-done. filed 0 issue(s) this run.
+done (dry-run). would file 0 issue(s) this run.
 ```
 
 ---
@@ -168,6 +168,55 @@ repo where Dependabot runs CI — so this file must be committed to the fork's
 
 ---
 
+## Metrics & dashboard — "how do I know this is working?"
+
+[`metrics.py`](metrics.py) (stdlib only) folds the live system state into one
+snapshot and answers that question for an engineering leader. It reads three
+signals:
+
+| Signal | Source | Answers |
+| --- | --- | --- |
+| **Pipeline health** | recent `scan.yml` Actions runs | Is the scanner even running? Success rate, last run, last conclusion. |
+| **Task status & throughput** | remediation/unblock issues on the fork | How many tasks created, open vs. closed, opened/closed per day, **median time-to-resolution (MTTR)**. |
+| **Devin sessions** | Devin API (`/v1/sessions?tags=dependabot`) | Active / blocked / finished / failed sessions and **success rate** (when `DEVIN_API`/`DEVIN_ORG_ID` are set). |
+
+It emits two things:
+
+1. **A Markdown report in every Actions run** — written to the run's job
+   summary, so a table dashboard renders right in the Actions tab. Zero infra.
+2. **`metrics.json`** — which drives a **GitHub Pages dashboard**
+   ([`dashboard/index.html`](dashboard/index.html), Chart.js): KPI cards, an
+   open-vs-closed task chart, a Devin-session donut, and a 30-day throughput
+   trend.
+
+### Deploy the dashboard
+
+[`.github/workflows/metrics.yml`](.github/workflows/metrics.yml) runs hourly (+
+manual dispatch), writes the job summary, and publishes Pages. To enable it:
+
+1. **Settings → Pages → Build and deployment → Source = GitHub Actions.**
+2. It reuses the same secrets as the scanner (`FORK_TOKEN` to read fork issues;
+   `DEVIN_API` + `DEVIN_ORG_ID` to include session metrics). No new secrets.
+3. Trigger it once: **Actions → "Orchestrator metrics dashboard" → Run
+   workflow**. The Pages URL appears in the run's `deploy` step (typically
+   `https://<owner>.github.io/<repo>/`).
+
+### Run the metrics locally
+
+```bash
+GITHUB_TOKEN=ghp_xxx FORK_REPO=aneeshacognition/superset \
+  SCANNER_REPO=aneeshacognition/aneeshadevinautomation \
+  METRICS_JSON_PATH=dashboard/metrics.json python3 metrics.py
+# then open dashboard/index.html (serve the folder so fetch() works):
+python3 -m http.server -d dashboard 8000   # http://localhost:8000
+```
+
+> The dashboard is empty until the scanner has filed real issues. For a first
+> populated view, do one live run with `MAX_ISSUES_PER_RUN=1` (a repo variable)
+> to watch a single issue → Devin session → fix PR cycle before scaling up.
+
+---
+
 ## Setting up the Devin secrets
 
 1. **Create a service user** at app.devin.ai → **Settings → Service Accounts**,
@@ -186,11 +235,16 @@ repo where Dependabot runs CI — so this file must be committed to the fork's
 ```
 .
 ├── dependabot_scanner.py          # the scanner (stdlib + PyYAML)
+├── metrics.py                     # effectiveness metrics -> metrics.json + summary
+├── dashboard/
+│   └── index.html                 # Chart.js dashboard (published to Pages)
 ├── Dockerfile                     # python:3.11-slim, non-root, entrypoint=scanner
 ├── docker-compose.yml             # `docker compose run --rm scanner`
 ├── requirements.txt               # PyYAML
 ├── .env.example                   # copy to .env for local runs
-├── .github/workflows/scan.yml     # scheduled Dockerized scan (runs here)
+├── .github/workflows/
+│   ├── scan.yml                   # scheduled Dockerized scan (runs here)
+│   └── metrics.yml                # hourly metrics + Pages dashboard
 └── examples/
     └── dependabot-ci-failed.yml   # copy this onto the fork's master
 ```

@@ -567,7 +567,10 @@ def run() -> None:
         budget -= 1
         filed += 1
 
-    print(f"done. filed {filed} issue(s) this run.")
+    if cfg.dry_run:
+        print(f"done (dry-run). would file {filed} issue(s) this run.")
+    else:
+        print(f"done. filed {filed} issue(s) this run.")
 
 
 if __name__ == "__main__":
