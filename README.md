@@ -189,17 +189,36 @@ It emits two things:
    open-vs-closed task chart, a Devin-session donut, and a 30-day throughput
    trend.
 
-### Deploy the dashboard
+### Deploy the dashboard (step by step)
 
 [`.github/workflows/metrics.yml`](.github/workflows/metrics.yml) runs hourly (+
-manual dispatch), writes the job summary, and publishes Pages. To enable it:
+manual dispatch), writes the job-summary report, and publishes the Pages
+dashboard. One-time setup on this repo:
 
-1. **Settings → Pages → Build and deployment → Source = GitHub Actions.**
-2. It reuses the same secrets as the scanner (`FORK_TOKEN` to read fork issues;
-   `DEVIN_API` + `DEVIN_ORG_ID` to include session metrics). No new secrets.
-3. Trigger it once: **Actions → "Orchestrator metrics dashboard" → Run
-   workflow**. The Pages URL appears in the run's `deploy` step (typically
-   `https://<owner>.github.io/<repo>/`).
+1. **Enable Pages.** Repo **Settings → Pages → Build and deployment → Source =
+   *GitHub Actions***. (No branch to pick — the workflow uploads the artifact.)
+2. **Confirm secrets exist** (Settings → Secrets and variables → Actions). The
+   workflow reuses the scanner's secrets — **no new secrets needed**:
+   - `FORK_TOKEN` — required, to read issues on the fork.
+   - `DEVIN_API` + `DEVIN_ORG_ID` — optional; include them to show Devin session
+     metrics. Without them the dashboard still renders the GitHub-only signals.
+   - Optional variable `FORK_REPO` (defaults to `aneeshacognition/superset`).
+3. **Run it once.** **Actions → "Orchestrator metrics dashboard" → Run
+   workflow** (the workflow also fires automatically every hour).
+4. **Read the two surfaces:**
+   - **In-Actions report (A):** open that run → the Markdown KPI table renders in
+     the run's **Summary**. Nothing to host.
+   - **Pages dashboard (B):** the live URL is printed in the run's **`deploy`**
+     step and also under **Settings → Pages** — typically
+     `https://<owner>.github.io/<repo>/` (here
+     `https://aneeshacognition.github.io/aneeshadevinautomation/`).
+
+> **The dashboard is empty until the scanner files real issues.** Your dry-runs
+> file nothing, so do one **live** scan first: set the repo variable
+> `MAX_ISSUES_PER_RUN=1`, then **Actions → "Dependabot backlog scanner
+> (Devin)" → Run workflow** with **`dry_run = false`**. That files one issue
+> (and starts one Devin session), which then shows up on the next metrics run.
+> Scale `MAX_ISSUES_PER_RUN` back up once you're happy.
 
 ### Run the metrics locally
 
