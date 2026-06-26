@@ -28,6 +28,7 @@ import os
 import re
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Iterable
@@ -48,6 +49,12 @@ REMEDIATION_MARKER = "Upstream-PR"  # body line: "Upstream-PR: #41420"
 UNBLOCK_MARKER = "Ignore-Dep"  # body line: "Ignore-Dep: react-icons"
 
 FAILED_CONCLUSIONS = {"failure", "timed_out", "cancelled", "action_required"}
+
+DEVIN_TAG = "dependabot"
+# Coarse v3 session statuses that mean a session is either in flight or already
+# done - re-triggering would only duplicate work. Only an ``error`` session is
+# treated as retryable, so the scanner can re-attempt a genuinely crashed run.
+DEVIN_LIVE_STATES = {"new", "claimed", "running", "resuming", "exit", "suspended"}
 
 
 # --------------------------------------------------------------------------- #
@@ -378,6 +385,68 @@ def create_issue(
 # --------------------------------------------------------------------------- #
 # Devin orchestrator nudge
 # --------------------------------------------------------------------------- #
+def _devin_headers(cfg: Config) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {cfg.devin_api_key}",
+        "Content-Type": "application/json",
+        "User-Agent": "dependabot-scanner",
+    }
+
+
+def live_session_tags(cfg: Config) -> set[str]:
+    """Tags of `dependabot` Devin sessions that already exist and have not failed.
+
+    Each remediation/unblock session is tagged with a unique per-work tag
+    (``upstream-pr-<n>`` or ``dep-<slug>``). Before triggering a new session we
+    check this set so a re-run (the 6-hourly cron, or a run while fork Issues
+    were disabled and the issue-marker de-dup couldn't fire) doesn't spawn a
+    duplicate session for work that is already in flight or done.
+
+    Returns an empty set if Devin is disabled or the API can't be reached, so
+    the scanner degrades gracefully to its issue-marker de-dup alone.
+    """
+    if not cfg.devin_enabled:
+        return set()
+    headers = _devin_headers(cfg)
+    base = f"{DEVIN_API}/v3/organizations/{cfg.devin_org_id}/sessions"
+    sessions: list[dict[str, Any]] = []
+    cursor: str | None = None
+    last_status = 200
+    for _ in range(20):  # hard cap: 20 pages
+        url = f"{base}?first=100&tags={DEVIN_TAG}"
+        if cursor:
+            url += f"&after={urllib.parse.quote(cursor)}"
+        last_status, body, _ = _request("GET", url, headers)
+        if last_status >= 400:
+            print(
+                f"WARN: could not list Devin sessions ({last_status}); "
+                "relying on issue-marker de-dup only"
+            )
+            return set()
+        body = body or {}
+        page = body.get("items") or body.get("sessions") or body.get("data") or []
+        if not page:
+            break
+        sessions.extend(page)
+        cursor = body.get("end_cursor")
+        if not body.get("has_next_page") or not cursor:
+            break
+    tags: set[str] = set()
+    for session in sessions:
+        if DEVIN_TAG not in (session.get("tags") or []):
+            continue
+        state = (
+            session.get("status")
+            or session.get("status_enum")
+            or session.get("state")
+            or ""
+        ).lower()
+        if state and state not in DEVIN_LIVE_STATES:
+            continue  # errored / unknown -> allow a retry
+        tags.update(session.get("tags") or [])
+    return tags
+
+
 def trigger_devin(cfg: Config, prompt: str, title: str, tags: list[str]) -> None:
     if not cfg.devin_enabled:
         print("Devin credentials not set; skipping orchestrator nudge")
@@ -516,6 +585,10 @@ def run() -> None:
     budget = cfg.max_issues_per_run
     filed = 0
 
+    # Tags of Devin sessions that already exist for a given PR/dep, so we never
+    # spawn a duplicate session even when the issue-marker de-dup can't fire.
+    active_tags = set() if cfg.dry_run else live_session_tags(cfg)
+
     # 1. Stuck upstream Dependabot PRs -> remediation issues.
     stuck = find_stuck_prs(gh, cfg)
     print(f"found {len(stuck)} stuck Dependabot PR(s)")
@@ -535,12 +608,17 @@ def run() -> None:
             remediation_body(pr, cfg),
             [REMEDIATION_LABEL, DEVIN_LABEL],
         )
-        trigger_devin(
-            cfg,
-            remediation_prompt(pr, cfg, url),
-            title,
-            ["dependabot", "dependabot-remediation", f"upstream-pr-{pr.number}"],
-        )
+        pr_tag = f"upstream-pr-{pr.number}"
+        if pr_tag in active_tags:
+            print(f"Devin session already exists for PR #{pr.number}; skipping trigger")
+        else:
+            trigger_devin(
+                cfg,
+                remediation_prompt(pr, cfg, url),
+                title,
+                [DEVIN_TAG, "dependabot-remediation", pr_tag],
+            )
+            active_tags.add(pr_tag)
         budget -= 1
         filed += 1
 
@@ -568,12 +646,17 @@ def run() -> None:
             [UNBLOCK_LABEL, DEVIN_LABEL],
         )
         slug = re.sub(r"[^a-z0-9]+", "-", name.lower())
-        trigger_devin(
-            cfg,
-            unblock_prompt(dep, cfg, url),
-            title,
-            ["dependabot", "dependabot-unblock", f"dep-{slug}"],
-        )
+        dep_tag = f"dep-{slug}"
+        if dep_tag in active_tags:
+            print(f"Devin session already exists for {name}; skipping trigger")
+        else:
+            trigger_devin(
+                cfg,
+                unblock_prompt(dep, cfg, url),
+                title,
+                [DEVIN_TAG, "dependabot-unblock", dep_tag],
+            )
+            active_tags.add(dep_tag)
         budget -= 1
         filed += 1
 
