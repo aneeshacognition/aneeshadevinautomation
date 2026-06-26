@@ -70,9 +70,10 @@
       footer { color: var(--muted); font-size: 12px; padding: 0 32px 32px; max-width: 1100px; margin: 0 auto; }
       a { color: var(--blue); }
       .empty { color: var(--muted); font-style: italic; }
-      .prs-layout { display: grid; grid-template-columns: 280px 1fr; gap: 24px; align-items: center; }
+      .prs-layout { display: grid; grid-template-columns: 220px 1fr; gap: 24px; align-items: center; }
       @media (max-width: 760px) { .prs-layout { grid-template-columns: 1fr; } }
-      #prsChart { max-height: 220px; }
+      .prs-chart-wrap { position: relative; height: 200px; }
+      #prsChart { max-height: 200px; }
       .prs-list { display: flex; flex-direction: column; gap: 8px; max-height: 240px; overflow-y: auto; }
       .pr-row { display: flex; align-items: center; gap: 10px; font-size: 13px; }
       .pr-row a { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -103,7 +104,7 @@
         <div class="panel wide">
           <h2>Fix PRs opened by Devin</h2>
           <div class="prs-layout">
-            <canvas id="prsChart"></canvas>
+            <div class="prs-chart-wrap"><canvas id="prsChart"></canvas></div>
             <div id="prsList" class="prs-list"></div>
           </div>
           <div id="prsEmpty" class="empty" style="display:none">
@@ -237,7 +238,7 @@
                 backgroundColor: [COLORS.purple, COLORS.green, COLORS.red],
               }],
             },
-            options: { responsive: true, plugins: { legend: { position: "right" } } },
+            options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: "right" } } },
           });
           document.getElementById("prsList").innerHTML = prList.map((p) =>
             `<div class="pr-row"><span class="pill ${p.state}">${p.state}</span>` +
