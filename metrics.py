@@ -44,6 +44,10 @@ UNBLOCK_LABEL = "dependabot-unblock"
 
 DEVIN_TAG = "dependabot"
 
+# Devin pushes each bump onto the upstream Dependabot branch, so the fix PRs it
+# opens on the fork all have a head branch under ``dependabot/``.
+PR_BRANCH_PREFIX = "dependabot/"
+
 # Devin v3 list-sessions reports a coarse ``status`` enum
 # (new, claimed, running, exit, error, suspended, resuming) plus a finer
 # ``status_detail`` (working, waiting_for_user, waiting_for_approval, finished,
@@ -275,6 +279,55 @@ def _build_trend(opened: Counter[str], closed: Counter[str]) -> list[dict[str, A
     ]
 
 
+def collect_pr_metrics(gh: GitHub, cfg: Config) -> dict[str, Any]:
+    """Count the remediation PRs Devin has opened on the fork.
+
+    Devin pushes its fix onto the upstream Dependabot branch, so the PRs it
+    opens all have a head ref under ``dependabot/``. We bucket them into
+    open / merged / closed-unmerged and keep a few of the most recent for the
+    dashboard's PR list.
+    """
+    try:
+        pulls = gh.paginate(f"/repos/{cfg.fork_repo}/pulls?state=all&per_page=100")
+    except RuntimeError:
+        return {"available": False}
+
+    open_n = merged_n = closed_n = 0
+    recent: list[dict[str, Any]] = []
+    for pr in pulls:
+        head = (pr.get("head") or {}).get("ref") or ""
+        if not head.startswith(PR_BRANCH_PREFIX):
+            continue
+        if pr.get("merged_at"):
+            state = "merged"
+            merged_n += 1
+        elif pr.get("state") == "closed":
+            state = "closed"
+            closed_n += 1
+        else:
+            state = "open"
+            open_n += 1
+        recent.append(
+            {
+                "number": pr.get("number"),
+                "title": pr.get("title"),
+                "url": pr.get("html_url"),
+                "state": state,
+                "created_at": pr.get("created_at"),
+            }
+        )
+
+    recent.sort(key=lambda p: p.get("created_at") or "", reverse=True)
+    return {
+        "available": True,
+        "total": open_n + merged_n + closed_n,
+        "open": open_n,
+        "merged": merged_n,
+        "closed": closed_n,
+        "recent": recent[:10],
+    }
+
+
 def collect_pipeline_health(gh: GitHub, cfg: Config) -> dict[str, Any]:
     if not cfg.metrics_repo:
         return {"available": False}
@@ -424,6 +477,7 @@ def render_markdown(snapshot: dict[str, Any]) -> str:
     pipe = snapshot["pipeline"]
     issues = snapshot["issues"]
     devin = snapshot["devin"]
+    prs = snapshot.get("pull_requests", {})
     t = issues["totals"]
 
     lines: list[str] = []
@@ -440,6 +494,11 @@ def render_markdown(snapshot: dict[str, Any]) -> str:
     lines.append(f"| Tasks created (total) | **{t['total']}** |")
     lines.append(f"| Open / Closed | {t['open']} / {t['closed']} |")
     lines.append(f"| Median time-to-resolution | {_fmt_hours(t['mttr_hours'])} |")
+    if prs.get("available"):
+        lines.append(
+            f"| Fix PRs opened (open/merged/closed) | **{prs['total']}** "
+            f"({prs['open']} / {prs['merged']} / {prs['closed']}) |"
+        )
     if devin.get("available"):
         lines.append(
             f"| Devin sessions (active/blocked/done/failed) | "
@@ -475,6 +534,17 @@ def render_markdown(snapshot: dict[str, Any]) -> str:
     )
     lines.append("")
 
+    if prs.get("available") and prs.get("recent"):
+        lines.append("## Fix PRs opened by Devin")
+        lines.append("")
+        lines.append("| PR | State |")
+        lines.append("| --- | --- |")
+        for pr in prs["recent"]:
+            lines.append(
+                f"| [#{pr['number']} {pr['title']}]({pr['url']}) | {pr['state']} |"
+            )
+        lines.append("")
+
     if not devin.get("available"):
         lines.append(
             f"> Devin session metrics unavailable: {devin.get('reason', 'unknown')}."
@@ -505,6 +575,7 @@ def build_snapshot(gh: GitHub, cfg: Config) -> dict[str, Any]:
         "fork_repo": cfg.fork_repo,
         "pipeline": collect_pipeline_health(gh, cfg),
         "issues": collect_issue_metrics(gh, cfg),
+        "pull_requests": collect_pr_metrics(gh, cfg),
         "devin": collect_devin_metrics(cfg),
     }
 
