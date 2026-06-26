@@ -151,6 +151,12 @@ needs a token that can file issues on the fork. Add these in this repo's
 - **Variables (optional):** `UPSTREAM_REPO`, `FORK_REPO`, `STUCK_MIN_FAILURES`,
   `MAX_ISSUES_PER_RUN`, `DEVIN_MAX_ACU`.
 
+> **Enable Issues on the fork.** GitHub disables the Issues tab on forks by
+> default. The scanner files its tracking issues there, so if Issues are off
+> it logs a `::warning::` and GitHub returns `410 Issues has been disabled`.
+> Turn it on under the fork's **Settings → General → Features → Issues**, then
+> re-run the scanner.
+
 > Prefer running the scanner directly from the fork instead? Drop
 > `dependabot_scanner.py` into the fork and call it from a scheduled workflow
 > there — then the fork's own `GITHUB_TOKEN` (with `issues: write`) is enough

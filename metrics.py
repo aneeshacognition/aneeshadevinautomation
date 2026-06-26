@@ -42,13 +42,18 @@ DEVIN_API = "https://api.devin.ai"
 REMEDIATION_LABEL = "dependabot-remediation"
 UNBLOCK_LABEL = "dependabot-unblock"
 
-# Devin session status_enum values that count as terminal success / failure.
-# The Devin API uses status_enum like: "RUNNING", "blocked", "finished",
-# "expired", "stopped". We normalise case and bucket them.
-SUCCESS_STATES = {"finished", "completed", "succeeded"}
+DEVIN_TAG = "dependabot"
+
+# Devin v3 list-sessions reports a coarse ``status`` enum
+# (new, claimed, running, exit, error, suspended, resuming) plus a finer
+# ``status_detail`` (working, waiting_for_user, waiting_for_approval, finished,
+# inactivity, error, ...). The sets below also keep the older v1
+# ``status_enum`` vocabulary working so the bucketing degrades gracefully.
+SUCCESS_STATES = {"finished", "completed", "succeeded", "exit"}
 FAILURE_STATES = {"expired", "failed", "cancelled", "error"}
-ACTIVE_STATES = {"running", "working", "resuming", "starting"}
+ACTIVE_STATES = {"running", "working", "resuming", "starting", "new", "claimed"}
 BLOCKED_STATES = {"blocked", "suspend_requested", "suspended"}
+WAITING_DETAILS = {"waiting_for_user", "waiting_for_approval"}
 
 SCAN_WORKFLOW_FILE = "scan.yml"
 TREND_DAYS = 30
@@ -297,17 +302,55 @@ def collect_pipeline_health(gh: GitHub, cfg: Config) -> dict[str, Any]:
     }
 
 
-def _bucket_session(status: str) -> str:
+def _bucket_session(status: str, detail: str = "") -> str:
     status = (status or "").lower()
-    if status in SUCCESS_STATES:
-        return "finished"
+    detail = (detail or "").lower()
+    # A session waiting on a human (or on approval) is "blocked" regardless of
+    # its coarse status, and an ``exit`` whose detail is an error is a failure.
+    if detail in WAITING_DETAILS:
+        return "blocked"
+    if status == "exit":
+        return "failed" if detail == "error" else "finished"
     if status in FAILURE_STATES:
         return "failed"
     if status in BLOCKED_STATES:
         return "blocked"
+    if status in SUCCESS_STATES:
+        return "finished"
     if status in ACTIVE_STATES:
         return "active"
     return "other"
+
+
+def _list_devin_sessions(
+    base: str, headers: dict[str, str], filter_tag: bool
+) -> tuple[list[dict[str, Any]], int]:
+    """Page through the v3 org sessions endpoint. Returns (sessions, last_status).
+
+    When ``filter_tag`` is set the request asks the server to filter by the
+    dependabot tag; otherwise it pulls every session and lets the caller filter.
+    """
+    sessions: list[dict[str, Any]] = []
+    cursor: str | None = None
+    last_status = 200
+    for _ in range(20):  # hard cap: 20 pages
+        url = f"{base}?first=100"
+        if filter_tag:
+            url += f"&tags={DEVIN_TAG}"
+        if cursor:
+            url += f"&after={urllib.parse.quote(cursor)}"
+        last_status, body, _h = _request("GET", url, headers)
+        if last_status >= 400:
+            return sessions, last_status
+        body = body or {}
+        page = body.get("items") or body.get("sessions") or body.get("data") or []
+        if not page:
+            break
+        sessions.extend(page)
+        cursor = body.get("end_cursor")
+        if not body.get("has_next_page") or not cursor:
+            break
+    return sessions, last_status
 
 
 def collect_devin_metrics(cfg: Config) -> dict[str, Any]:
@@ -318,34 +361,30 @@ def collect_devin_metrics(cfg: Config) -> dict[str, Any]:
         "Content-Type": "application/json",
         "User-Agent": "dependabot-metrics",
     }
-    sessions: list[dict[str, Any]] = []
-    # The list endpoint is paginated by limit/offset; tagged sessions only.
-    offset = 0
-    for _ in range(20):  # hard cap: 20 pages
-        url = f"{DEVIN_API}/v1/sessions?limit=100&offset={offset}&tags=dependabot"
-        status, body, _h = _request("GET", url, headers)
-        if status >= 400:
-            return {
-                "available": False,
-                "reason": f"Devin API returned {status}",
-            }
-        page = (body or {}).get("sessions") or (body or {}).get("data") or []
-        if not page:
-            break
-        sessions.extend(page)
-        if len(page) < 100:
-            break
-        offset += 100
+    # Use the v3 organization endpoint - the org/service-account token that can
+    # *create* sessions (POST /v3/organizations/{org}/sessions) is authorized
+    # here too, whereas the v1 /sessions list rejects it with 403. The endpoint
+    # is cursor-paginated and returns sessions under "items". We try server-side
+    # tag filtering first and fall back to fetching all sessions and filtering
+    # client-side if the tag query is rejected.
+    base = f"{DEVIN_API}/v3/organizations/{cfg.devin_org_id}/sessions"
+    sessions, status = _list_devin_sessions(base, headers, filter_tag=True)
+    if status >= 400:
+        sessions, status = _list_devin_sessions(base, headers, filter_tag=False)
+    if status >= 400:
+        return {"available": False, "reason": f"Devin API returned {status}"}
+    sessions = [s for s in sessions if DEVIN_TAG in (s.get("tags") or [])]
 
     buckets: Counter[str] = Counter()
     for session in sessions:
         state = (
-            session.get("status_enum")
-            or session.get("status")
+            session.get("status")
+            or session.get("status_enum")
             or session.get("state")
             or ""
         )
-        buckets[_bucket_session(state)] += 1
+        detail = session.get("status_detail") or ""
+        buckets[_bucket_session(state, detail)] += 1
 
     terminal = buckets["finished"] + buckets["failed"]
     success_rate = round(100 * buckets["finished"] / terminal) if terminal else None
