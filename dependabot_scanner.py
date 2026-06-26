@@ -359,6 +359,16 @@ def create_issue(
     )
     if status != 201:
         print(f"ERROR creating issue '{title}': {status}: {body_resp}")
+        disabled = status == 410 or (
+            isinstance(body_resp, dict)
+            and "issues has been disabled" in str(body_resp.get("message", "")).lower()
+        )
+        if disabled:
+            print(
+                f"::warning::Issues are disabled on {cfg.fork_repo}; cannot file "
+                "tracking issues. Enable them under Settings -> General -> "
+                "Features -> Issues, then re-run the scanner."
+            )
         return None
     url = body_resp["html_url"]
     print(f"created issue: {url}")
