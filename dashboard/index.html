@@ -70,6 +70,15 @@
       footer { color: var(--muted); font-size: 12px; padding: 0 32px 32px; max-width: 1100px; margin: 0 auto; }
       a { color: var(--blue); }
       .empty { color: var(--muted); font-style: italic; }
+      .prs-layout { display: grid; grid-template-columns: 280px 1fr; gap: 24px; align-items: center; }
+      @media (max-width: 760px) { .prs-layout { grid-template-columns: 1fr; } }
+      #prsChart { max-height: 220px; }
+      .prs-list { display: flex; flex-direction: column; gap: 8px; max-height: 240px; overflow-y: auto; }
+      .pr-row { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+      .pr-row a { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .pill.merged { background: rgba(163,113,247,.15); color: var(--purple); }
+      .pill.open { background: rgba(46,160,67,.15); color: var(--green); }
+      .pill.closed { background: rgba(248,81,73,.15); color: var(--red); }
     </style>
   </head>
   <body>
@@ -89,6 +98,16 @@
           <canvas id="devinChart"></canvas>
           <div id="devinEmpty" class="empty" style="display:none">
             Devin session metrics unavailable.
+          </div>
+        </div>
+        <div class="panel wide">
+          <h2>Fix PRs opened by Devin</h2>
+          <div class="prs-layout">
+            <canvas id="prsChart"></canvas>
+            <div id="prsList" class="prs-list"></div>
+          </div>
+          <div id="prsEmpty" class="empty" style="display:none">
+            No fix PRs found on the fork yet.
           </div>
         </div>
         <div class="panel wide">
@@ -140,6 +159,7 @@
         const t = d.issues.totals;
         const devin = d.devin || {};
         const pipe = d.pipeline || {};
+        const prs = d.pull_requests || {};
 
         document.getElementById("subtitle").innerHTML =
           `${d.fork_repo} · snapshot ${fmtTs(d.generated_at)}`;
@@ -148,6 +168,10 @@
         cards.push(kpi("Tasks created", t.total, ""));
         cards.push(kpi("Open / Closed", `${t.open} / ${t.closed}`, ""));
         cards.push(kpi("Median resolution", fmtHours(t.mttr_hours), ""));
+        if (prs.available) {
+          cards.push(kpi("Fix PRs opened", prs.total,
+            `${prs.merged} merged / ${prs.open} open`));
+        }
         if (devin.available) {
           cards.push(kpi("Devin success", fmtPct(devin.success_rate_pct),
             `${devin.finished}✓ / ${devin.failed}✗`));
@@ -201,6 +225,29 @@
           if (devin && devin.reason) empty.textContent = "Devin metrics unavailable: " + devin.reason;
         }
 
+        // Fix PRs opened by Devin
+        const prList = (prs.recent || []);
+        if (prs.available && prs.total > 0) {
+          new Chart(document.getElementById("prsChart"), {
+            type: "doughnut",
+            data: {
+              labels: ["Merged", "Open", "Closed"],
+              datasets: [{
+                data: [prs.merged, prs.open, prs.closed],
+                backgroundColor: [COLORS.purple, COLORS.green, COLORS.red],
+              }],
+            },
+            options: { responsive: true, plugins: { legend: { position: "right" } } },
+          });
+          document.getElementById("prsList").innerHTML = prList.map((p) =>
+            `<div class="pr-row"><span class="pill ${p.state}">${p.state}</span>` +
+            `<a href="${p.url}" title="${p.title}">#${p.number} ${p.title}</a></div>`
+          ).join("");
+        } else {
+          document.getElementById("prsChart").style.display = "none";
+          document.getElementById("prsEmpty").style.display = "block";
+        }
+
         // Throughput trend
         const trend = d.issues.trend || [];
         new Chart(document.getElementById("trendChart"), {
@@ -219,6 +266,7 @@
 
         const links = [];
         links.push(`<a href="https://github.com/${d.fork_repo}/issues?q=label%3Adependabot-remediation%2Cdependabot-unblock">View tracking issues</a>`);
+        links.push(`<a href="https://github.com/${d.fork_repo}/pulls?q=is%3Apr+head%3Adependabot%2F">View fix PRs</a>`);
         if (pipe.last_run_url) links.push(`<a href="${pipe.last_run_url}">Latest scanner run</a>`);
         links.push(`<a href="metrics.json">Raw metrics.json</a>`);
         document.getElementById("footer").innerHTML = links.join(" · ");
